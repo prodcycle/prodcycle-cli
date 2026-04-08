@@ -128,7 +128,7 @@ API keys are created through the ProdCycle dashboard.
 ## Requirements
 
 - Node.js >= 24.0.0
-- Python >= 3.10
+- Python >= 3.12
 
 ## License
 
