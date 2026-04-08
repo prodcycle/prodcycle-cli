@@ -1,6 +1,6 @@
 {
   "name": "@prodcycle/compliance-code-scanner",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-framework policy-as-code compliance scanner for infrastructure and application code.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
