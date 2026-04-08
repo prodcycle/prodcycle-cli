@@ -6,8 +6,11 @@ on:
 
 jobs:
   publish-npm:
-    name: Publish to npm
+    name: Publish to npm and GitHub Packages
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     defaults:
       run:
         working-directory: ./node
@@ -27,10 +30,21 @@ jobs:
       - name: Build TypeScript
         run: npm run build
 
-      - name: Publish package
+      - name: Publish package to npm
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          
+      - name: Setup Node.js for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://npm.pkg.github.com'
+          
+      - name: Publish package to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-pypi:
     name: Publish to PyPI

@@ -21,6 +21,15 @@ This repository hosts both the npm (Node.js) package and the PyPI (Python) packa
 npm install -g @prodcycle/compliance-code-scanner
 ```
 
+### GitHub Packages (npm alternative)
+If you prefer to install from GitHub Packages, configure your npm to point to the ProdCycle scope:
+
+```bash
+echo "@prodcycle:registry=https://npm.pkg.github.com" > .npmrc
+npm login --scope=@prodcycle --registry=https://npm.pkg.github.com
+npm install @prodcycle/compliance-code-scanner
+```
+
 ### Python (PyPI)
 ```bash
 pip install compliance-code-scanner
