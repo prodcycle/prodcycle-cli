@@ -13,6 +13,17 @@ authors = [
     {name = "ProdCycle, Inc.", email = "engineering@prodcycle.com"},
 ]
 keywords = ["compliance", "soc2", "hipaa", "nist", "cli", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
 
 [project.scripts]
 compliance-code-scanner = "compliance_code_scanner.cli:main"
