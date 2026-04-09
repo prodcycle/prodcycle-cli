@@ -8,7 +8,7 @@ import { scan } from './index';
 const program = new Command();
 
 program
-  .name('compliance-code-scanner')
+  .name('prodcycle')
   .description('Multi-framework policy-as-code compliance scanner for infrastructure and application code.')
   .version('0.1.0')
   .argument('[repo_path]', 'Path to the repository to scan', '.')

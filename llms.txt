@@ -1,4 +1,4 @@
-# Compliance Code Scanner
+# ProdCycle CLI
 
 > Multi-framework, policy-as-code compliance scanner for infrastructure and application code. Evaluate Terraform, Kubernetes, Dockerfiles, CI configs, and source code in TypeScript, JavaScript, Python, Go, Java, and Ruby against SOC 2, HIPAA, and NIST CSF, powered by OPA/Rego and Cedar engines.
 
@@ -8,17 +8,17 @@
 
 ## Quick Links
 
-- Package: `npm install -g @prodcycle/compliance-code-scanner`
+- Package: `npm install -g @prodcycle/prodcycle`
 - Website: [prodcycle.com](https://prodcycle.com)
 - Status: [status.prodcycle.com](https://status.prodcycle.com)
 
 ## Overview
 
-Compliance Code Scanner is a multi-framework, policy-as-code compliance scanner that evaluates infrastructure and application code against SOC 2, HIPAA, and NIST CSF. It uses OPA/Rego and Cedar policy engines.
+ProdCycle CLI is a multi-framework, policy-as-code compliance scanner that evaluates infrastructure and application code against SOC 2, HIPAA, and NIST CSF. It uses OPA/Rego and Cedar policy engines.
 
 ### Usage modes
 
-- **CLI**: `compliance-code-scanner . --framework soc2,hipaa`
+- **CLI**: `prodcycle . --framework soc2,hipaa`
 - **TypeScript SDK**: `scan()`, `gate()`, `runHook()`, `runHookApi()`
 - **AI Agent Hooks**: Auto-configures Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Gemini CLI
 - **REST API**: POST /v1/compliance/hook, POST /v1/compliance/validate, GET /v1/compliance/scans
@@ -39,7 +39,7 @@ Source code (.ts, .tsx, .js, .jsx, .py, .go, .java, .rb)
 
 ---
 
-# Compliance Code Scanner API Details
+# ProdCycle CLI API Details
 
 ### CLI
 
@@ -56,7 +56,7 @@ SOC 2, HIPAA, and NIST CSF with tiered policies.
 OPA/Rego and Cedar engines with 3-tier confidence system for infra and app code.
 
 ```bash
-npm install @prodcycle/compliance-code-scanner
+npm install @prodcycle/prodcycle
 ```
 
 ## Quickstart
@@ -64,7 +64,7 @@ npm install @prodcycle/compliance-code-scanner
 Three steps to go from zero to a compliant codebase.
 
 ```typescript
-import { scan, gate } from '@prodcycle/compliance-code-scanner';
+import { scan, gate } from '@prodcycle/prodcycle';
 
 // Scan a repo
 const { report, exitCode } = await scan({
@@ -91,7 +91,7 @@ Available as an npm package. A Python package is coming soon.
 Node.js ≥ 24 for the TypeScript SDK. Python SDK (≥ 3.10) is coming soon.
 
 ```bash
-npm install @prodcycle/compliance-code-scanner
+npm install @prodcycle/prodcycle
 ```
 
 ## CLI: Scan
@@ -100,26 +100,26 @@ The default command. Walks a repository, collects infrastructure and source code
 
 ```bash
 # Basic scan
-compliance-code-scanner ./my-project
+prodcycle ./my-project
 
 # SOC 2 + HIPAA, JSON output
-compliance-code-scanner . \
+prodcycle . \
   --framework soc2,hipaa \
   --format json \
   --output report.json
 
 # SARIF for GitHub Code Scanning
-compliance-code-scanner . \
+prodcycle . \
   --format sarif \
   --output results.sarif
 
 # Only Terraform files, high+ severity
-compliance-code-scanner . \
+prodcycle . \
   --include "**/*.tf,**/*.tfvars" \
   --severity-threshold high
 
 # List all available frameworks
-compliance-code-scanner --list-frameworks
+prodcycle --list-frameworks
 ```
 
 | Parameter | Type | Description |
@@ -145,13 +145,13 @@ The hook reads agent tool output from stdin, extracts the edited file path, and 
 
 ```bash
 # Local hook (reads agent output from stdin)
-npx compliance-code-scanner --hook
+npx prodcycle --hook
 
 # With explicit file path
-npx compliance-code-scanner --hook --hook-file infra/main.tf
+npx prodcycle --hook --hook-file infra/main.tf
 
 # Multiple frameworks
-npx compliance-code-scanner --hook --framework soc2,hipaa
+npx prodcycle --hook --framework soc2,hipaa
 ```
 
 | Parameter | Type | Description |
@@ -169,10 +169,10 @@ One-command setup that auto-configures compliance hooks for your AI coding agent
 
 ```bash
 # Configure all agents
-npx compliance-code-scanner --init
+npx prodcycle --init
 
 # Hosted API mode
-npx compliance-code-scanner --init \
+npx prodcycle --init \
   --agent claude-code,cursor,github-copilot \
   --framework soc2,hipaa \
   --api-url https://api.example.com
@@ -205,7 +205,7 @@ import {
   formatTable,
   formatSarif,
   formatPrompt,
-} from '@prodcycle/compliance-code-scanner';
+} from '@prodcycle/prodcycle';
 
 const response = await scan({
   repoPath: '/path/to/repo',
@@ -250,7 +250,7 @@ const prompt = formatPrompt(response.report);
 Scan code strings directly without writing files to disk. Accepts a map of file paths to contents, hits the hosted API, and cleans up. Ideal for LLM-generated code, API integrations, and test harnesses.
 
 ```typescript
-import { gate } from '@prodcycle/compliance-code-scanner';
+import { gate } from '@prodcycle/prodcycle';
 
 const result = await gate({
   files: {
@@ -295,7 +295,7 @@ Programmatic interface for the local post-edit hook. Reads the edited file path 
 Returns Promise<number>: 0 = pass/skip, 2 = violations found.
 
 ```typescript
-import { runHook } from '@prodcycle/compliance-code-scanner';
+import { runHook } from '@prodcycle/prodcycle';
 
 const exitCode = await runHook({
   frameworks: ['soc2', 'hipaa'],
@@ -322,7 +322,7 @@ Hosted API hook. Collects all infrastructure files from the project directory an
 import {
   runHookApi,
   collectInfraFiles,
-} from '@prodcycle/compliance-code-scanner';
+} from '@prodcycle/prodcycle';
 
 // Run API hook
 const exitCode = await runHookApi({
@@ -355,7 +355,7 @@ import {
   formatTable,
   formatPrompt,
   formatSarif,
-} from '@prodcycle/compliance-code-scanner';
+} from '@prodcycle/prodcycle';
 
 const { report } = await scan({
   repoPath: '.',
@@ -384,7 +384,7 @@ Hook agents (Claude Code, Cursor) run scans automatically. Instruction agents (C
 
 ```bash
 # One command to set up everything
-npx compliance-code-scanner --init
+npx prodcycle --init
 ```
 
 ## API Reference
@@ -459,7 +459,7 @@ jobs:
           node-version: '24'
 
       - name: Run compliance scan
-        run: npx compliance-code-scanner . \
+        run: npx prodcycle . \
           --framework soc2,hipaa \
           --format sarif \
           --output results.sarif

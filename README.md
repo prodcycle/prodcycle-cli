@@ -1,4 +1,4 @@
-# @prodcycle/compliance-code-scanner
+# @prodcycle/prodcycle
 
 Multi-framework policy-as-code compliance scanner for infrastructure and application code. Scans Terraform, Kubernetes, Docker, `.env`, and application source (TypeScript, Python, Go, Java, Ruby) against SOC 2, HIPAA, and NIST CSF policies.
 
@@ -18,7 +18,7 @@ This repository hosts both the npm (Node.js) package and the PyPI (Python) packa
 
 ### Node.js (npm)
 ```bash
-npm install -g @prodcycle/compliance-code-scanner
+npm install -g @prodcycle/prodcycle
 ```
 
 ### GitHub Packages (npm alternative)
@@ -27,12 +27,12 @@ If you prefer to install from GitHub Packages, configure your npm to point to th
 ```bash
 echo "@prodcycle:registry=https://npm.pkg.github.com" > .npmrc
 npm login --scope=@prodcycle --registry=https://npm.pkg.github.com
-npm install @prodcycle/compliance-code-scanner
+npm install @prodcycle/prodcycle
 ```
 
 ### Python (PyPI)
 ```bash
-pip install compliance-code-scanner
+pip install prodcycle
 ```
 
 ## Quick Start
@@ -41,19 +41,19 @@ pip install compliance-code-scanner
 
 ```bash
 # Scan current directory against SOC 2 and HIPAA
-compliance-code-scanner . --framework soc2,hipaa
+prodcycle . --framework soc2,hipaa
 
 # Output as SARIF for GitHub Code Scanning
-compliance-code-scanner . --framework soc2 --format sarif --output results.sarif
+prodcycle . --framework soc2 --format sarif --output results.sarif
 
 # Set severity threshold (only report HIGH and above)
-compliance-code-scanner . --framework hipaa --severity-threshold high
+prodcycle . --framework hipaa --severity-threshold high
 ```
 
 ### Programmatic API (TypeScript)
 
 ```typescript
-import { scan, gate } from '@prodcycle/compliance-code-scanner';
+import { scan, gate } from '@prodcycle/prodcycle';
 
 // Full Repository Scan
 const { report, findings, exitCode } = await scan({
@@ -86,7 +86,7 @@ if (!result.passed) {
 ### Programmatic API (Python)
 
 ```python
-from compliance_code_scanner import scan, gate
+from prodcycle import scan, gate
 
 # Full Repository Scan
 response = scan(

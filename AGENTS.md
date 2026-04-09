@@ -1,8 +1,8 @@
-# Agent Guidelines for compliance-code-scanner
+# Agent Guidelines for prodcycle
 
 ## Project Overview
 
-This is the npm CLI wrapper package (`@prodcycle/compliance-code-scanner`) that scans repositories for SOC 2, HIPAA, and NIST CSF compliance violations via the ProdCycle REST API. It acts as a lightweight Node.js client (using Commander) connecting to `https://api.prodcycle.com/v1/compliance/validate` and `https://api.prodcycle.com/v1/compliance/hook`.
+This is the npm CLI wrapper package (`@prodcycle/prodcycle`) that scans repositories for SOC 2, HIPAA, and NIST CSF compliance violations via the ProdCycle REST API. It acts as a lightweight Node.js client (using Commander) connecting to `https://api.prodcycle.com/v1/compliance/validate` and `https://api.prodcycle.com/v1/compliance/hook`.
 
 ## Architecture
 

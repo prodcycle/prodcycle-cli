@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "compliance-code-scanner"
+name = "prodcycle"
 version = "0.1.3"
 description = "Multi-framework policy-as-code compliance scanner for infrastructure and application code."
 readme = "README.md"
@@ -26,9 +26,9 @@ classifiers = [
 ]
 
 [project.scripts]
-compliance-code-scanner = "compliance_code_scanner.cli:main"
+prodcycle = "prodcycle.cli:main"
 
 [project.urls]
 Homepage = "https://prodcycle.com"
 Documentation = "https://docs.prodcycle.com"
-Repository = "https://github.com/prodcycle/compliance-code-scanner-cli"
+Repository = "https://github.com/prodcycle/prodcycle-cli"
