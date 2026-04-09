@@ -15,7 +15,7 @@ def is_binary(file_path):
 def collect_files(base_dir, include_patterns=None, exclude_patterns=None):
     if not include_patterns:
         include_patterns = ['**/*']
-        
+
     ignore_list = [
         'node_modules', '.git', '.terraform', 'dist', 'build', '__pycache__',
         '.venv', 'venv', '.next', '.nuxt', 'vendor', 'coverage', '.tox', 'target',
@@ -34,7 +34,7 @@ def collect_files(base_dir, include_patterns=None, exclude_patterns=None):
         for filepath in glob.iglob(glob_pattern, recursive=True):
             if not os.path.isfile(filepath):
                 continue
-                
+
             # Check exclusions manually since standard python glob doesn't have an ignore kwarg
             rel_path = os.path.relpath(filepath, base_dir)
             should_ignore = False
@@ -42,7 +42,7 @@ def collect_files(base_dir, include_patterns=None, exclude_patterns=None):
                 if ign in rel_path.split(os.sep) or rel_path.startswith(ign):
                     should_ignore = True
                     break
-            
+
             if should_ignore:
                 continue
 
@@ -67,7 +67,7 @@ def collect_files(base_dir, include_patterns=None, exclude_patterns=None):
 
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    
+
                 files[rel_path] = content
                 count += 1
             except Exception:

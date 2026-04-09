@@ -38,11 +38,34 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const glob_1 = require("glob");
 const MAX_FILE_SIZE = 256 * 1024; // 256 KB
-const MAX_TOTAL_FILES = 500;
+const MAX_TOTAL_FILES = 10_000;
 async function collectFiles(baseDir, includePatterns, excludePatterns) {
     // Simple implementation using glob
     const patterns = includePatterns && includePatterns.length > 0 ? includePatterns : ['**/*'];
-    const ignore = ['node_modules/**', '.git/**', '.terraform/**', 'dist/**', 'build/**', '**/__pycache__/**'];
+    const ignore = [
+        'node_modules/**',
+        '.git/**',
+        '.terraform/**',
+        'dist/**',
+        'build/**',
+        '**/__pycache__/**',
+        '.next/**',
+        '.nuxt/**',
+        'vendor/**',
+        'coverage/**',
+        '.venv/**',
+        'venv/**',
+        '.tox/**',
+        'target/**',
+        '*.lock',
+        'package-lock.json',
+        '*.min.js',
+        '*.min.css',
+        '*.map',
+        '*.bundle.js',
+        '*.tfstate',
+        '*.tfstate.backup',
+    ];
     if (excludePatterns && excludePatterns.length > 0) {
         ignore.push(...excludePatterns);
     }
