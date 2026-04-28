@@ -134,11 +134,5 @@ export declare class ComplianceApiClient {
      */
     private request;
 }
-/**
- * Split a `{ path: content }` map into chunks that respect both a byte
- * cap and a file-count cap. UTF-8 byte-length is used since the server
- * counts the request body's bytes after JSON serialisation; this is a
- * conservative client-side approximation.
- */
 export declare function chunkFiles(files: Record<string, string>, maxBytes: number, maxFiles: number): Record<string, string>[];
 export {};

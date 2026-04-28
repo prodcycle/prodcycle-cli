@@ -193,11 +193,17 @@ class ComplianceApiClient {
     async validateAndPoll(files, frameworks, options = {}) {
         const { scanId } = await this.validateAsync(files, frameworks, options);
         const deadline = Date.now() + ASYNC_POLL_TIMEOUT_MS;
-        while (Date.now() < deadline) {
+        // Always poll at least once, and always do one final poll *after*
+        // the last sleep before declaring a timeout — otherwise a scan that
+        // completes during the trailing sleep window would be reported as a
+        // timeout even though the result is sitting on the server.
+        while (true) {
             const scan = await this.getScan(scanId);
             if (scan.status === 'COMPLETED' || scan.status === 'FAILED') {
                 return { scanId, ...scan };
             }
+            if (Date.now() >= deadline)
+                break;
             await sleep(ASYNC_POLL_INTERVAL_MS);
         }
         throw new Error(`Async validate scan ${scanId} did not complete within ${ASYNC_POLL_TIMEOUT_MS / 1000}s. Re-run with the same scanId to keep polling: pc scans get ${scanId}`);
@@ -255,13 +261,15 @@ class ComplianceApiClient {
                 // the retry path below handles based on status code.
             }
             if (response.ok) {
-                // Unwrap {status, statusCode, data: {...}} envelope if present.
-                if (parsed &&
-                    typeof parsed === 'object' &&
-                    'data' in parsed &&
-                    parsed.data &&
-                    typeof parsed.data === 'object' &&
-                    'status' in parsed) {
+                // Unwrap the API envelope only when the discriminant
+                // {status: "success" | "error", statusCode, data} is present.
+                // Bare key presence isn't enough: a `ScanResult` already has a
+                // `status` field (PASSED/FAILED/IN_PROGRESS) and an open index
+                // signature, so checking only for `'status' in parsed && 'data'
+                // in parsed` would misidentify a scan result that happens to
+                // include a `data` key as an envelope and silently drop the
+                // top-level `passed`, `scanId`, `findings` fields.
+                if (isApiEnvelope(parsed)) {
                     return parsed.data;
                 }
                 return parsed ?? {};
@@ -279,8 +287,10 @@ class ComplianceApiClient {
             }
             throw new ApiError(response.status, errorBody, retryAfterSeconds, errorMessage);
         }
-        // Loop exited via continue with no successful response — surface the
-        // last error rather than returning silently.
+        // Unreachable in practice: every iteration returns, throws, or
+        // continues. Kept only to satisfy the type-checker that this method
+        // always returns or throws.
+        /* istanbul ignore next */
         throw lastError ?? new Error('Exhausted retries without a response');
     }
 }
@@ -305,6 +315,19 @@ function retryBackoffMs(attempt) {
  * We support both. Returns seconds as a non-negative integer, or null if
  * the header is missing/unparseable.
  */
+/**
+ * Detect the API's envelope shape strictly: a plain object whose
+ * `status` is the discriminant string "success" or "error" and that
+ * carries a `data` payload. Anything else (including a bare scan result
+ * that happens to contain `status: "PASSED"` and a `data` key) is
+ * passed through unchanged so we don't silently drop top-level fields.
+ */
+function isApiEnvelope(value) {
+    if (!value || typeof value !== 'object')
+        return false;
+    const v = value;
+    return (v.status === 'success' || v.status === 'error') && 'data' in v;
+}
 function parseRetryAfter(value) {
     if (!value)
         return null;
@@ -323,21 +346,32 @@ function parseRetryAfter(value) {
  * counts the request body's bytes after JSON serialisation; this is a
  * conservative client-side approximation.
  */
+// Per-file overhead in the JSON-serialized request body. Each entry is
+// `"path":"content",` which adds two pairs of quotes (4 bytes), one
+// colon, one comma, and a small margin for backslash-escapes inside the
+// content. 16 bytes is a conservative upper bound; the goal is to avoid
+// undersizing — the server enforces the real cap.
+const PER_FILE_JSON_OVERHEAD = 16;
+// One-time wrapper overhead for the chunk request body itself
+// (`{"files":{...}}`).
+const PER_CHUNK_JSON_OVERHEAD = 16;
 function chunkFiles(files, maxBytes, maxFiles) {
     const chunks = [];
     let current = {};
-    let currentBytes = 0;
+    let currentBytes = PER_CHUNK_JSON_OVERHEAD;
     let currentCount = 0;
     for (const [filePath, content] of Object.entries(files)) {
-        const fileBytes = Buffer.byteLength(content, 'utf8') + Buffer.byteLength(filePath, 'utf8');
+        const fileBytes = Buffer.byteLength(content, 'utf8') +
+            Buffer.byteLength(filePath, 'utf8') +
+            PER_FILE_JSON_OVERHEAD;
         // If a single file exceeds the cap on its own we can't split it further
         // here — emit it as its own chunk and let the server's per-file cap (if
         // any) reject if needed. Common case: huge SQL dumps, generated bundles.
-        if (fileBytes > maxBytes) {
+        if (fileBytes + PER_CHUNK_JSON_OVERHEAD > maxBytes) {
             if (currentCount > 0) {
                 chunks.push(current);
                 current = {};
-                currentBytes = 0;
+                currentBytes = PER_CHUNK_JSON_OVERHEAD;
                 currentCount = 0;
             }
             chunks.push({ [filePath]: content });
@@ -346,7 +380,7 @@ function chunkFiles(files, maxBytes, maxFiles) {
         if (currentBytes + fileBytes > maxBytes || currentCount + 1 > maxFiles) {
             chunks.push(current);
             current = {};
-            currentBytes = 0;
+            currentBytes = PER_CHUNK_JSON_OVERHEAD;
             currentCount = 0;
         }
         current[filePath] = content;
