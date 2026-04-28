@@ -61,6 +61,25 @@ interface ApiError extends Error {
  * No proprietary policy code ships with the CLI — all evaluation happens
  * server-side. The client only walks files and posts them.
  */
+/**
+ * Read a positive integer from an env var or fall back to a default.
+ * Used for retry / concurrency / timeout knobs so operators can tune
+ * the client at deploy time without forking the SDK.
+ */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+/**
+ * Per-request fetch timeout. Without this, a stalled connection would
+ * tie up the CLI indefinitely on any of the three chunked-session
+ * legs (open / chunks / complete), bypassing the retry cap.
+ */
+const REQUEST_TIMEOUT_MS = envInt('PC_REQUEST_TIMEOUT_MS', 120_000);
+
 export class ComplianceApiClient {
   private apiUrl: string;
   private apiKey: string;
@@ -75,15 +94,26 @@ export class ComplianceApiClient {
     this.apiUrl = apiUrl || process.env.PC_API_URL || 'https://api.prodcycle.com';
     this.apiKey = apiKey || process.env.PC_API_KEY || '';
     this.retryOptions = {
-      maxAttempts: options.retry?.maxAttempts ?? 4,
-      initialDelayMs: options.retry?.initialDelayMs ?? 500,
-      maxDelayMs: options.retry?.maxDelayMs ?? 30_000,
-      backoffMultiplier: options.retry?.backoffMultiplier ?? 2,
+      maxAttempts:
+        options.retry?.maxAttempts ?? envInt('PC_MAX_RETRY_ATTEMPTS', 4),
+      initialDelayMs:
+        options.retry?.initialDelayMs ?? envInt('PC_RETRY_INITIAL_DELAY_MS', 500),
+      maxDelayMs:
+        options.retry?.maxDelayMs ?? envInt('PC_RETRY_MAX_DELAY_MS', 30_000),
+      backoffMultiplier:
+        options.retry?.backoffMultiplier ?? envInt('PC_RETRY_BACKOFF_MULTIPLIER', 2),
     };
-    this.chunkConcurrency = options.chunkConcurrency ?? 4;
+    this.chunkConcurrency =
+      options.chunkConcurrency ?? envInt('PC_CHUNK_CONCURRENCY', 4);
 
-    if (!this.apiKey && process.env.NODE_ENV !== 'test') {
-      console.warn('Warning: PC_API_KEY is not set. API calls will likely fail.');
+    if (
+      !this.apiKey &&
+      process.env.NODE_ENV !== 'test' &&
+      !process.env.PC_SUPPRESS_WARNINGS
+    ) {
+      process.stderr.write(
+        'Warning: PC_API_KEY is not set. API calls will likely fail.\n',
+      );
     }
   }
 
@@ -172,8 +202,17 @@ export class ComplianceApiClient {
       },
     })) as { scanId: string; chunkSizeBytes: number; maxFilesPerChunk: number };
 
-    const chunkBytes = serverHints.chunkSizeBytes ?? session.chunkSizeBytes ?? 5 * 1024 * 1024;
-    const chunkFiles = serverHints.maxFilesPerChunk ?? session.maxFilesPerChunk ?? 200;
+    // Fallbacks are env-overridable so operators can tune chunk size
+    // independently of server hints (e.g. behind a proxy with stricter
+    // body limits than the server's announced cap).
+    const chunkBytes =
+      serverHints.chunkSizeBytes ??
+      session.chunkSizeBytes ??
+      envInt('PC_DEFAULT_CHUNK_MAX_BYTES', 5 * 1024 * 1024);
+    const chunkFiles =
+      serverHints.maxFilesPerChunk ??
+      session.maxFilesPerChunk ??
+      envInt('PC_DEFAULT_CHUNK_MAX_FILES', 200);
 
     // Step 2 — split the file map into chunks bounded by both byte size
     // and file count.
@@ -206,10 +245,28 @@ export class ComplianceApiClient {
       {},
     )) as { passed: boolean; findingsCount: number; summary: unknown; durationMs: number };
 
+    // Derive findingsCount from the client-accumulated array so
+    // findings.length === findingsCount always holds. The server's
+    // /complete returns its own findingsCount which can disagree if it
+    // dedupes or filters at finalization (e.g. severityThreshold); use
+    // the post-finalize delta only as a sanity log, not as the source
+    // of truth callers see.
+    const finalCount = allFindings.length;
+    if (
+      typeof finalResult.findingsCount === 'number' &&
+      finalResult.findingsCount !== finalCount
+    ) {
+      process.stderr.write(
+        `Note: server reported findingsCount=${finalResult.findingsCount} ` +
+          `but client accumulated ${finalCount} findings across chunks ` +
+          `(server may have deduped or filtered at finalize).\n`,
+      );
+    }
+
     return {
       scanId: session.scanId,
       passed: finalResult.passed,
-      findingsCount: finalResult.findingsCount,
+      findingsCount: finalCount,
       findings: allFindings,
       summary: finalResult.summary,
       durationMs: finalResult.durationMs,
@@ -258,6 +315,9 @@ export class ComplianceApiClient {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(data),
+          // Cap each request so a stalled connection can't bypass the
+          // retry budget. Configurable via PC_REQUEST_TIMEOUT_MS.
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
 
         if (response.ok) {

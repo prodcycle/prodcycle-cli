@@ -16,27 +16,6 @@ export interface GateOptions {
     apiUrl?: string;
     config?: Record<string, unknown>;
 }
-/**
- * ComplianceApiClient — thin client for the ProdCycle compliance API.
- *
- * Phase 2b additions:
- *
- *   1. Per-file content hashing — `sha256(content)` is computed locally so
- *      the server-side cache can return prior verdicts without re-running
- *      OPA.
- *   2. Chunked scan sessions — when `/validate` returns 413 with
- *      `suggestedEndpoint: '/v1/compliance/scans'`, the client transparently
- *      opens a session, splits the file map into chunks of the
- *      server-recommended size, uploads them with bounded concurrency, and
- *      finalizes. The caller sees the same response shape as a one-shot
- *      `/validate`.
- *   3. Exponential backoff on 429 / 503 — honors `Retry-After` when
- *      present, otherwise uses jittered exponential backoff. Configurable
- *      via `RetryOptions`.
- *
- * No proprietary policy code ships with the CLI — all evaluation happens
- * server-side. The client only walks files and posts them.
- */
 export declare class ComplianceApiClient {
     private apiUrl;
     private apiKey;
