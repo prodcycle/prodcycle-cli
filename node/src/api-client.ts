@@ -252,37 +252,40 @@ export class ComplianceApiClient {
       {},
     )) as { passed: boolean; findingsCount: number; summary: unknown; durationMs: number };
 
+    // Filter the client-accumulated findings to those that meet the
+    // configured `severityThreshold` (or fall back to `failOn`). The
+    // server applies this filter at finalize to compute `passed`, but
+    // /chunks responses return ALL findings — so without filtering
+    // here we can return `{ passed: true, findings: [low-sev, …] }`,
+    // which looks contradictory to formatters and CI consumers.
+    // Filtering keeps the contract internally consistent: passed=true
+    // ↔ findings has no items at-or-above threshold.
+    const filtered = filterFindingsByThreshold(allFindings, options);
+
     // Sort findings by a stable (path, line, ruleId) key so two
     // identical runs return findings in the same order regardless of
-    // which chunk's network response arrived first. Without this,
-    // SARIF/JSON output diff-noises across runs and downstream
-    // consumers (e.g. PR-comment dedup) can't rely on positional
-    // identity.
-    sortFindingsStable(allFindings);
+    // which chunk's network response arrived first.
+    sortFindingsStable(filtered);
 
-    // Derive findingsCount from the client-accumulated array so
-    // findings.length === findingsCount always holds. The server's
-    // /complete returns its own findingsCount which can disagree if it
-    // dedupes or filters at finalization (e.g. severityThreshold); use
-    // the post-finalize delta only as a sanity log, not as the source
-    // of truth callers see.
-    const finalCount = allFindings.length;
+    // Sanity-log if the server's count disagrees with our filtered set
+    // — drift here means the server's filter isn't quite the same as
+    // ours, which is worth knowing but not fatal.
     if (
       typeof finalResult.findingsCount === 'number' &&
-      finalResult.findingsCount !== finalCount
+      finalResult.findingsCount !== filtered.length
     ) {
       logger.warn(
         `server reported findingsCount=${finalResult.findingsCount} ` +
-          `but client accumulated ${finalCount} findings across chunks ` +
-          `(server may have deduped or filtered at finalize).`,
+          `but client filtered to ${filtered.length} findings ` +
+          `(severity_threshold/failOn drift between client and server).`,
       );
     }
 
     return {
       scanId: session.scanId,
       passed: finalResult.passed,
-      findingsCount: finalCount,
-      findings: allFindings,
+      findingsCount: filtered.length,
+      findings: filtered,
       summary: finalResult.summary,
       durationMs: finalResult.durationMs,
       cachedFiles: totalCachedFiles,
@@ -349,11 +352,16 @@ export class ComplianceApiClient {
         }
 
         // Honor Retry-After if the server gave us one; otherwise use
-        // exponential backoff with full jitter.
+        // exponential backoff with full jitter. Cap the server-provided
+        // value at `maxDelayMs` so a misbehaving upstream returning
+        // `Retry-After: 3600` can't pin the CLI for an hour per attempt
+        // (with maxAttempts=4 that'd be ~3 hours wall-clock in the
+        // worst case, well beyond any sane CI step timeout).
         const retryAfterHeader = response.headers.get('retry-after');
-        const waitMs = retryAfterHeader
+        const rawWaitMs = retryAfterHeader
           ? parseRetryAfterMs(retryAfterHeader)
           : jitteredBackoff(delay);
+        const waitMs = Math.min(rawWaitMs, this.retryOptions.maxDelayMs);
         await sleep(waitMs);
         delay = Math.min(delay * this.retryOptions.backoffMultiplier, this.retryOptions.maxDelayMs);
       } catch (err) {
@@ -363,8 +371,23 @@ export class ComplianceApiClient {
           throw apiErr;
         }
 
-        // Network error (fetch threw before getting a response).
+        // Distinguish a request-timeout (AbortSignal.timeout fired) from
+        // a real connect-time failure. Both reach this branch because
+        // fetch throws in either case, but the user-actionable diagnosis
+        // is very different ("server too slow" vs "can't reach server").
+        const isTimeout =
+          apiErr instanceof Error &&
+          (apiErr.name === 'TimeoutError' || apiErr.name === 'AbortError');
+
+        // Network/timeout error (fetch threw before getting a response).
         if (attempt >= this.retryOptions.maxAttempts) {
+          if (isTimeout) {
+            throw new Error(
+              `ProdCycle API request timed out after ${REQUEST_TIMEOUT_MS}ms (${url}). ` +
+                `Tune via PC_REQUEST_TIMEOUT_MS, or use \`prodcycle scan --async\` ` +
+                `for long-running scans.`,
+            );
+          }
           throw new Error(
             `Failed to connect to ProdCycle API at ${url}: ${apiErr.message}`,
           );
@@ -563,6 +586,45 @@ function findingSortKey(f: unknown): [string, number, string] {
         ? v.controlId
         : '';
   return [path, line, ruleId];
+}
+
+// Severity ordering used for client-side threshold filtering — matches
+// the server's ordering (compliance-code-scanner uses the same).
+const SEVERITY_RANK: Record<string, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+/**
+ * Filter findings to those that meet the caller's severity threshold
+ * (or fall back to the failOn list). Keeps `passed` and `findings`
+ * internally consistent in the chunked path: chunk responses surface
+ * every finding regardless of threshold, but `/complete`'s `passed`
+ * verdict is computed against the threshold. Without this filter, a
+ * scan with only low-severity findings + `severityThreshold: 'medium'`
+ * would return `{ passed: true, findings: [low, …] }`, which
+ * contradicts the verdict.
+ */
+function filterFindingsByThreshold(findings: unknown[], options: ScanOptions): unknown[] {
+  const threshold = options.severityThreshold;
+  // If both threshold and failOn are unset, nothing to filter on —
+  // surface everything (matches /validate's all-findings response).
+  if (!threshold && (!options.failOn || options.failOn.length === 0)) {
+    return findings;
+  }
+  const minRank = threshold ? (SEVERITY_RANK[threshold] ?? 0) : 0;
+  const failOnSet = new Set(
+    (options.failOn ?? []).map((s) => String(s).toLowerCase()),
+  );
+  return findings.filter((f) => {
+    if (!f || typeof f !== 'object') return false;
+    const sev = String((f as { severity?: unknown }).severity ?? '').toLowerCase();
+    if (failOnSet.size > 0 && failOnSet.has(sev)) return true;
+    const rank = SEVERITY_RANK[sev] ?? 0;
+    return rank >= minRank;
+  });
 }
 
 /**
