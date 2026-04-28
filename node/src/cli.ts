@@ -12,6 +12,7 @@ type Format = 'json' | 'sarif' | 'table' | 'prompt';
 
 const KNOWN_COMMANDS = new Set([
   'scan',
+  'scans',
   'gate',
   'hook',
   'init',

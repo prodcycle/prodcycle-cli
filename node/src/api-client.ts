@@ -1,6 +1,3 @@
-import * as fs from 'fs';
-import * as path from 'path';
-
 export interface ScanOptions {
   severityThreshold?: 'low' | 'medium' | 'high' | 'critical';
   failOn?: ('low' | 'medium' | 'high' | 'critical')[];
@@ -70,17 +67,37 @@ export class ApiError extends Error {
 const DEFAULT_API_URL = 'https://api.prodcycle.com';
 
 /**
+ * Read a positive integer from an env var or fall back to a default. Used
+ * for the timeout / retry knobs below so operators can tune behavior in CI
+ * without forking the CLI.
+ */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+/**
  * Maximum retry attempts for 429/503 responses. After this many tries we
  * give up and surface the error to the caller.
  */
-const MAX_RETRY_ATTEMPTS = 4;
+const MAX_RETRY_ATTEMPTS = envInt('PC_MAX_RETRY_ATTEMPTS', 4);
 
 /**
  * Hard ceiling on Retry-After (seconds). Even if the server asks for more
  * than this we cap it so the CLI doesn't appear to hang indefinitely on a
  * misconfigured server.
  */
-const MAX_RETRY_AFTER_SECONDS = 300;
+const MAX_RETRY_AFTER_SECONDS = envInt('PC_MAX_RETRY_AFTER_SECONDS', 300);
+
+/**
+ * Per-request fetch timeout. Without this a stalled connection would tie
+ * up the CLI indefinitely, bypassing both the retry cap and the async-poll
+ * deadline. Default is 2 minutes — long enough for the largest non-async
+ * sync `/validate` call, short enough that a hung TCP socket gets aborted.
+ */
+const REQUEST_TIMEOUT_MS = envInt('PC_REQUEST_TIMEOUT_MS', 120_000);
 
 /**
  * Conservative client-side chunk sizing for the chunked-session flow. The
@@ -90,16 +107,22 @@ const MAX_RETRY_AFTER_SECONDS = 300;
  * findings cache means re-scans of unchanged files are O(1) regardless of
  * chunk size, so picking on the smaller side costs little.
  */
-const DEFAULT_CHUNK_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
-const DEFAULT_CHUNK_MAX_FILES = 200;
+const DEFAULT_CHUNK_MAX_BYTES = envInt(
+  'PC_DEFAULT_CHUNK_MAX_BYTES',
+  5 * 1024 * 1024, // 5 MB
+);
+const DEFAULT_CHUNK_MAX_FILES = envInt('PC_DEFAULT_CHUNK_MAX_FILES', 200);
 
 /**
  * Async-validate poll cadence. The server typically completes scans in
  * 10–60 s; polling every 2 s keeps the round-trip overhead bounded while
  * still feeling responsive in interactive use.
  */
-const ASYNC_POLL_INTERVAL_MS = 2000;
-const ASYNC_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const ASYNC_POLL_INTERVAL_MS = envInt('PC_ASYNC_POLL_INTERVAL_MS', 2000);
+const ASYNC_POLL_TIMEOUT_MS = envInt(
+  'PC_ASYNC_POLL_TIMEOUT_MS',
+  10 * 60 * 1000, // 10 minutes
+);
 
 export class ComplianceApiClient {
   private apiUrl: string;
@@ -109,8 +132,14 @@ export class ComplianceApiClient {
     this.apiUrl = apiUrl || process.env.PC_API_URL || DEFAULT_API_URL;
     this.apiKey = apiKey || process.env.PC_API_KEY || '';
 
-    if (!this.apiKey && process.env.NODE_ENV !== 'test') {
-      console.warn('Warning: PC_API_KEY is not set. API calls will likely fail.');
+    if (
+      !this.apiKey &&
+      process.env.NODE_ENV !== 'test' &&
+      !process.env.PC_SUPPRESS_WARNINGS
+    ) {
+      process.stderr.write(
+        'Warning: PC_API_KEY is not set. API calls will likely fail.\n',
+      );
     }
   }
 
@@ -324,6 +353,7 @@ export class ComplianceApiClient {
             ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
           },
           ...(data !== null ? { body: JSON.stringify(data) } : {}),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (networkErr: unknown) {
         // Connection-level failures (DNS, TCP, TLS). Treat as retryable up
@@ -371,7 +401,7 @@ export class ComplianceApiClient {
       const isRetryable = response.status === 429 || response.status === 503;
       if (isRetryable && attempt < MAX_RETRY_ATTEMPTS - 1) {
         const delayMs =
-          (retryAfterSeconds ?? Math.ceil(retryBackoffMs(attempt) / 1000)) * 1000;
+          retryAfterSeconds != null ? retryAfterSeconds * 1000 : retryBackoffMs(attempt);
         const cappedDelayMs = Math.min(delayMs, MAX_RETRY_AFTER_SECONDS * 1000);
         await sleep(cappedDelayMs);
         continue;
@@ -468,6 +498,3 @@ export function chunkFiles(
 
   return chunks;
 }
-
-// Preserve the legacy named imports referenced by older callers.
-export { fs, path };

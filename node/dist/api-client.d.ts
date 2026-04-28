@@ -1,5 +1,3 @@
-import * as fs from 'fs';
-import * as path from 'path';
 export interface ScanOptions {
     severityThreshold?: 'low' | 'medium' | 'high' | 'critical';
     failOn?: ('low' | 'medium' | 'high' | 'critical')[];
@@ -143,4 +141,4 @@ export declare class ComplianceApiClient {
  * conservative client-side approximation.
  */
 export declare function chunkFiles(files: Record<string, string>, maxBytes: number, maxFiles: number): Record<string, string>[];
-export { fs, path };
+export {};

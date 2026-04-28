@@ -43,6 +43,7 @@ const sarif_1 = require("./formatters/sarif");
 const prompt_1 = require("./formatters/prompt");
 const KNOWN_COMMANDS = new Set([
     'scan',
+    'scans',
     'gate',
     'hook',
     'init',
