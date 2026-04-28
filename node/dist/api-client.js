@@ -1,18 +1,151 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ComplianceApiClient = void 0;
+exports.splitIntoChunks = splitIntoChunks;
+exports.runWithConcurrency = runWithConcurrency;
+const crypto = __importStar(require("crypto"));
+/**
+ * ComplianceApiClient — thin client for the ProdCycle compliance API.
+ *
+ * Phase 2b additions:
+ *
+ *   1. Per-file content hashing — `sha256(content)` is computed locally so
+ *      the server-side cache can return prior verdicts without re-running
+ *      OPA.
+ *   2. Chunked scan sessions — when `/validate` returns 413 with
+ *      `suggestedEndpoint: '/v1/compliance/scans'`, the client transparently
+ *      opens a session, splits the file map into chunks of the
+ *      server-recommended size, uploads them with bounded concurrency, and
+ *      finalizes. The caller sees the same response shape as a one-shot
+ *      `/validate`.
+ *   3. Exponential backoff on 429 / 503 — honors `Retry-After` when
+ *      present, otherwise uses jittered exponential backoff. Configurable
+ *      via `RetryOptions`.
+ *
+ * No proprietary policy code ships with the CLI — all evaluation happens
+ * server-side. The client only walks files and posts them.
+ */
+/**
+ * Read a positive integer from an env var or fall back to a default.
+ * Used for retry / concurrency / timeout knobs so operators can tune
+ * the client at deploy time without forking the SDK.
+ */
+function envInt(name, fallback) {
+    const raw = process.env[name];
+    if (!raw)
+        return fallback;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+/**
+ * Per-request fetch timeout. Without this, a stalled connection would
+ * tie up the CLI indefinitely on any of the three chunked-session
+ * legs (open / chunks / complete), bypassing the retry cap.
+ */
+const REQUEST_TIMEOUT_MS = envInt('PC_REQUEST_TIMEOUT_MS', 120_000);
 class ComplianceApiClient {
     apiUrl;
     apiKey;
-    constructor(apiUrl, apiKey) {
+    retryOptions;
+    chunkConcurrency;
+    constructor(apiUrl, apiKey, options = {}) {
         this.apiUrl = apiUrl || process.env.PC_API_URL || 'https://api.prodcycle.com';
         this.apiKey = apiKey || process.env.PC_API_KEY || '';
-        if (!this.apiKey && process.env.NODE_ENV !== 'test') {
-            console.warn('Warning: PC_API_KEY is not set. API calls will likely fail.');
+        this.retryOptions = {
+            maxAttempts: options.retry?.maxAttempts ?? envInt('PC_MAX_RETRY_ATTEMPTS', 4),
+            initialDelayMs: options.retry?.initialDelayMs ?? envInt('PC_RETRY_INITIAL_DELAY_MS', 500),
+            maxDelayMs: options.retry?.maxDelayMs ?? envInt('PC_RETRY_MAX_DELAY_MS', 30_000),
+            backoffMultiplier: options.retry?.backoffMultiplier ?? envInt('PC_RETRY_BACKOFF_MULTIPLIER', 2),
+        };
+        this.chunkConcurrency =
+            options.chunkConcurrency ?? envInt('PC_CHUNK_CONCURRENCY', 4);
+        if (!this.apiKey &&
+            process.env.NODE_ENV !== 'test' &&
+            !process.env.PC_SUPPRESS_WARNINGS) {
+            logger.warn('PC_API_KEY is not set. API calls will likely fail.');
         }
     }
+    /**
+     * Run a CI/PR validation scan. Auto-falls-back to the chunked-session
+     * path (`POST /v1/compliance/scans`) when the request is too large for
+     * the single-payload `/validate` endpoint — the server tells us so via
+     * a 413 with `suggestedEndpoint: '/v1/compliance/scans'` (Phase 1c).
+     */
     async validate(files, frameworks, options = {}) {
-        return this.post('/v1/compliance/validate', {
+        try {
+            return (await this.post('/v1/compliance/validate', {
+                files,
+                frameworks,
+                options: {
+                    severity_threshold: options.severityThreshold,
+                    fail_on: options.failOn,
+                    ...options.config,
+                },
+            }));
+        }
+        catch (err) {
+            const apiErr = err;
+            if (apiErr.status === 413 && apiErr.details?.suggestedEndpoint === '/v1/compliance/scans') {
+                // Server says: too big for /validate, use chunked. Forward only
+                // the byte hint — `apiErr.details.maxFiles` is the /validate
+                // per-request file cap (~200), NOT the /chunks per-chunk file
+                // cap (~2000). Reusing it as `maxFilesPerChunk` would
+                // over-split into many tiny chunks; let scanChunked fall back
+                // to the session's reported `maxFilesPerChunk` (or the env-var
+                // default) instead.
+                const chunked = await this.scanChunked(files, frameworks, options, {
+                    chunkSizeBytes: apiErr.details.chunkSizeBytes,
+                });
+                return {
+                    passed: chunked.passed,
+                    findingsCount: chunked.findingsCount,
+                    findings: chunked.findings,
+                    summary: chunked.summary,
+                    scanId: chunked.scanId,
+                };
+            }
+            throw err;
+        }
+    }
+    /**
+     * Coding agent file-write hook. Single-payload only — agents send 1
+     * file at a time, so chunking would be pure overhead.
+     */
+    async hook(files, frameworks, options = {}) {
+        return (await this.post('/v1/compliance/hook', {
             files,
             frameworks,
             options: {
@@ -20,34 +153,392 @@ class ComplianceApiClient {
                 fail_on: options.failOn,
                 ...options.config,
             },
-        });
+        }));
     }
-    async hook(files, frameworks) {
-        return this.post('/v1/compliance/hook', {
-            files,
+    /**
+     * Run a scan via the chunked-session endpoint. Splits files into chunks
+     * sized for the server's `/validate` cap, uploads them with bounded
+     * concurrency, and finalizes. Returns a shape compatible with `/validate`
+     * so callers don't need to special-case.
+     */
+    async scanChunked(files, frameworks, options = {}, serverHints = {}) {
+        // Step 1 — open the session. The server returns its own recommended
+        // chunk size; trust it over the 413 hint if present (it knows the
+        // current /chunks cap exactly).
+        const session = (await this.post('/v1/compliance/scans', {
             frameworks,
+            options: {
+                severity_threshold: options.severityThreshold,
+                fail_on: options.failOn,
+                ...options.config,
+            },
+        }));
+        // The session response trumps the 413 hint: a 413 from /validate
+        // carries the /validate payload cap (5 MB), but the /chunks endpoint
+        // has its own (50 MB) cap that the freshly-opened session reports
+        // exactly. Using the stale 413 hint here would over-shrink chunks
+        // and trigger many unnecessary upload round-trips. Env vars are the
+        // last-ditch fallback for both, so operators can still cap below
+        // the server-reported max if they're behind a stricter proxy.
+        const chunkBytes = session.chunkSizeBytes ??
+            serverHints.chunkSizeBytes ??
+            envInt('PC_DEFAULT_CHUNK_MAX_BYTES', 5 * 1024 * 1024);
+        const chunkFiles = session.maxFilesPerChunk ??
+            serverHints.maxFilesPerChunk ??
+            envInt('PC_DEFAULT_CHUNK_MAX_FILES', 200);
+        // Step 2 — split the file map into chunks bounded by both byte size
+        // and file count.
+        const chunks = splitIntoChunks(files, chunkBytes, chunkFiles);
+        // Step 3 — upload chunks with bounded concurrency. Each chunk POST
+        // benefits from the server's per-content findings cache (Phase 1d):
+        // unchanged files re-scanned across runs return cached verdicts in
+        // milliseconds without invoking OPA.
+        let totalCachedFiles = 0;
+        let totalScannedFiles = 0;
+        const allFindings = [];
+        await runWithConcurrency(this.chunkConcurrency, chunks, async (chunk) => {
+            const chunkResult = (await this.post(`/v1/compliance/scans/${session.scanId}/chunks`, { files: chunk }));
+            totalCachedFiles += chunkResult.cachedFiles ?? 0;
+            totalScannedFiles += chunkResult.scannedFiles ?? 0;
+            if (Array.isArray(chunkResult.chunkFindings)) {
+                allFindings.push(...chunkResult.chunkFindings);
+            }
         });
+        // Step 4 — finalize. Server flips status to COMPLETED, computes the
+        // summary, and triggers reconcile against the previous scan.
+        const finalResult = (await this.post(`/v1/compliance/scans/${session.scanId}/complete`, {}));
+        // Filter the client-accumulated findings to those that meet the
+        // configured `severityThreshold` (or fall back to `failOn`). The
+        // server applies this filter at finalize to compute `passed`, but
+        // /chunks responses return ALL findings — so without filtering
+        // here we can return `{ passed: true, findings: [low-sev, …] }`,
+        // which looks contradictory to formatters and CI consumers.
+        // Filtering keeps the contract internally consistent: passed=true
+        // ↔ findings has no items at-or-above threshold.
+        const filtered = filterFindingsByThreshold(allFindings, options);
+        // Sort findings by a stable (path, line, ruleId) key so two
+        // identical runs return findings in the same order regardless of
+        // which chunk's network response arrived first.
+        sortFindingsStable(filtered);
+        // Sanity-log if the server's count disagrees with our filtered set
+        // — drift here means the server's filter isn't quite the same as
+        // ours, which is worth knowing but not fatal.
+        if (typeof finalResult.findingsCount === 'number' &&
+            finalResult.findingsCount !== filtered.length) {
+            logger.warn(`server reported findingsCount=${finalResult.findingsCount} ` +
+                `but client filtered to ${filtered.length} findings ` +
+                `(severity_threshold/failOn drift between client and server).`);
+        }
+        return {
+            scanId: session.scanId,
+            passed: finalResult.passed,
+            findingsCount: filtered.length,
+            findings: filtered,
+            summary: finalResult.summary,
+            durationMs: finalResult.durationMs,
+            cachedFiles: totalCachedFiles,
+            scannedFiles: totalScannedFiles,
+        };
     }
+    /**
+     * Compute the SHA-256 of file content. Exposed so callers can pre-hash
+     * locally and decide what to send (e.g. skip files whose hash hasn't
+     * changed since the last scan). The server's per-content cache uses
+     * the same algorithm, so a hit on the client-side cache is a hit on
+     * the server-side cache.
+     */
+    static sha256(content) {
+        return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+    }
+    /**
+     * Internal POST with retry/backoff on transient errors.
+     *
+     * Retries:
+     *   - 429 Too Many Requests — honor `Retry-After` header if present
+     *   - 503 Service Unavailable — same
+     *   - Network errors (fetch throws) — retry with backoff
+     *
+     * Does NOT retry:
+     *   - 4xx other than 429 — caller's bug; surface immediately
+     *   - 5xx other than 503 — server bug; surface immediately
+     *   - 413 Payload Too Large — caller is expected to handle this (e.g.
+     *     fall back to chunked)
+     */
     async post(endpoint, data) {
         const url = `${this.apiUrl}${endpoint}`;
-        try {
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${this.apiKey}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(data),
-            });
-            const responseData = await response.json();
-            if (!response.ok) {
-                throw new Error(responseData.error?.message || `API request failed with status ${response.status}`);
+        let attempt = 0;
+        let delay = this.retryOptions.initialDelayMs;
+        while (true) {
+            attempt++;
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${this.apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data),
+                    // Cap each request so a stalled connection can't bypass the
+                    // retry budget. Configurable via PC_REQUEST_TIMEOUT_MS.
+                    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                });
+                if (response.ok) {
+                    return await unwrapEnvelope(response);
+                }
+                // Non-2xx — decide whether to retry or throw.
+                const errorBody = await safeReadJson(response);
+                const apiError = buildApiError(response, errorBody);
+                const isRetryable = response.status === 429 || response.status === 503;
+                if (!isRetryable || attempt >= this.retryOptions.maxAttempts) {
+                    throw apiError;
+                }
+                // Honor Retry-After if the server gave us one; otherwise use
+                // exponential backoff with full jitter. Cap the server-provided
+                // value at `maxDelayMs` so a misbehaving upstream returning
+                // `Retry-After: 3600` can't pin the CLI for an hour per attempt
+                // (with maxAttempts=4 that'd be ~3 hours wall-clock in the
+                // worst case, well beyond any sane CI step timeout).
+                const retryAfterHeader = response.headers.get('retry-after');
+                const rawWaitMs = retryAfterHeader
+                    ? parseRetryAfterMs(retryAfterHeader)
+                    : jitteredBackoff(delay);
+                const waitMs = Math.min(rawWaitMs, this.retryOptions.maxDelayMs);
+                await sleep(waitMs);
+                delay = Math.min(delay * this.retryOptions.backoffMultiplier, this.retryOptions.maxDelayMs);
             }
-            return responseData;
-        }
-        catch (error) {
-            throw new Error(`Failed to connect to ProdCycle API: ${error.message}`);
+            catch (err) {
+                const apiErr = err;
+                // ApiError from above (status set) — already decided not to retry.
+                if (apiErr.status !== undefined) {
+                    throw apiErr;
+                }
+                // Distinguish a request-timeout (AbortSignal.timeout fired) from
+                // a real connect-time failure. Both reach this branch because
+                // fetch throws in either case, but the user-actionable diagnosis
+                // is very different ("server too slow" vs "can't reach server").
+                const isTimeout = apiErr instanceof Error &&
+                    (apiErr.name === 'TimeoutError' || apiErr.name === 'AbortError');
+                // Network/timeout error (fetch threw before getting a response).
+                if (attempt >= this.retryOptions.maxAttempts) {
+                    if (isTimeout) {
+                        throw new Error(`ProdCycle API request timed out after ${REQUEST_TIMEOUT_MS}ms (${url}). ` +
+                            `Tune via PC_REQUEST_TIMEOUT_MS, or use \`prodcycle scan --async\` ` +
+                            `for long-running scans.`);
+                    }
+                    throw new Error(`Failed to connect to ProdCycle API at ${url}: ${apiErr.message}`);
+                }
+                await sleep(jitteredBackoff(delay));
+                delay = Math.min(delay * this.retryOptions.backoffMultiplier, this.retryOptions.maxDelayMs);
+            }
         }
     }
 }
 exports.ComplianceApiClient = ComplianceApiClient;
+// =============================================================================
+// HELPERS (unexported — kept module-local to avoid bloating the public API)
+// =============================================================================
+/**
+ * Split a file map into chunks bounded by total byte size AND file count.
+ * Files larger than `maxBytes` are placed in their own chunk (the server
+ * will 413 them with a per-file size error — surfacing that at the
+ * server boundary keeps client logic simple).
+ */
+function splitIntoChunks(files, maxBytes, maxFiles) {
+    const chunks = [];
+    let current = {};
+    let currentBytes = 0;
+    let currentCount = 0;
+    for (const [path, content] of Object.entries(files)) {
+        const fileBytes = Buffer.byteLength(content, 'utf8');
+        // Pre-check — if adding this file would push the chunk over either cap,
+        // close the current chunk first.
+        if ((currentBytes + fileBytes > maxBytes && currentCount > 0) ||
+            currentCount >= maxFiles) {
+            chunks.push(current);
+            current = {};
+            currentBytes = 0;
+            currentCount = 0;
+        }
+        current[path] = content;
+        currentBytes += fileBytes;
+        currentCount += 1;
+    }
+    if (currentCount > 0)
+        chunks.push(current);
+    return chunks;
+}
+/**
+ * Run an async task over each item with at most `concurrency` workers
+ * in flight. Errors propagate; remaining tasks are abandoned (the
+ * server-side session expires via TTL — no client-side cleanup needed).
+ */
+async function runWithConcurrency(concurrency, items, fn) {
+    let cursor = 0;
+    const workers = [];
+    const next = async () => {
+        while (cursor < items.length) {
+            const i = cursor++;
+            await fn(items[i]);
+        }
+    };
+    for (let i = 0; i < Math.max(1, Math.min(concurrency, items.length)); i++) {
+        workers.push(next());
+    }
+    await Promise.all(workers);
+}
+/**
+ * Parse the `Retry-After` HTTP header. Per RFC 7231 it can be either a
+ * delta-seconds integer or an HTTP-date. We only handle the integer form
+ * because the API never emits HTTP-date Retry-After.
+ */
+function parseRetryAfterMs(header) {
+    const seconds = parseInt(header, 10);
+    if (!isNaN(seconds) && seconds >= 0)
+        return seconds * 1000;
+    return 1000; // sensible fallback
+}
+/** Full-jitter exponential backoff (AWS recommended pattern). */
+function jitteredBackoff(baseMs) {
+    return Math.floor(Math.random() * baseMs);
+}
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+/**
+ * Minimal stderr-only logger. The OSS CLI is a thin client and doesn't
+ * pull in pino/winston, but we still want a single replaceable surface
+ * for diagnostic output rather than direct `console.warn` /
+ * `process.stderr.write` calls scattered through the client. Set
+ * `PC_SUPPRESS_WARNINGS=1` to silence all warnings, or replace
+ * `logger` here with a richer implementation if downstream consumers
+ * want structured logs.
+ */
+const logger = {
+    warn(message) {
+        if (process.env.PC_SUPPRESS_WARNINGS)
+            return;
+        process.stderr.write(`prodcycle: ${message}\n`);
+    },
+};
+function findingSortKey(f) {
+    if (!f || typeof f !== 'object')
+        return ['', 0, ''];
+    const v = f;
+    const path = typeof v.resourcePath === 'string'
+        ? v.resourcePath
+        : typeof v.path === 'string'
+            ? v.path
+            : '';
+    const line = typeof v.startLine === 'number'
+        ? v.startLine
+        : typeof v.line === 'number'
+            ? v.line
+            : 0;
+    const ruleId = typeof v.ruleId === 'string'
+        ? v.ruleId
+        : typeof v.controlId === 'string'
+            ? v.controlId
+            : '';
+    return [path, line, ruleId];
+}
+// Severity ordering used for client-side threshold filtering — matches
+// the server's ordering (compliance-code-scanner uses the same).
+const SEVERITY_RANK = {
+    low: 1,
+    medium: 2,
+    high: 3,
+    critical: 4,
+};
+/**
+ * Filter findings to those that meet the caller's severity threshold
+ * (or fall back to the failOn list). Keeps `passed` and `findings`
+ * internally consistent in the chunked path: chunk responses surface
+ * every finding regardless of threshold, but `/complete`'s `passed`
+ * verdict is computed against the threshold. Without this filter, a
+ * scan with only low-severity findings + `severityThreshold: 'medium'`
+ * would return `{ passed: true, findings: [low, …] }`, which
+ * contradicts the verdict.
+ */
+function filterFindingsByThreshold(findings, options) {
+    const threshold = options.severityThreshold;
+    // If both threshold and failOn are unset, nothing to filter on —
+    // surface everything (matches /validate's all-findings response).
+    if (!threshold && (!options.failOn || options.failOn.length === 0)) {
+        return findings;
+    }
+    const minRank = threshold ? (SEVERITY_RANK[threshold] ?? 0) : 0;
+    const failOnSet = new Set((options.failOn ?? []).map((s) => String(s).toLowerCase()));
+    return findings.filter((f) => {
+        if (!f || typeof f !== 'object')
+            return false;
+        const sev = String(f.severity ?? '').toLowerCase();
+        if (failOnSet.size > 0 && failOnSet.has(sev))
+            return true;
+        const rank = SEVERITY_RANK[sev] ?? 0;
+        return rank >= minRank;
+    });
+}
+/**
+ * Sort findings in place by (path, line, ruleId) so two identical
+ * runs return findings in the same order regardless of which chunk's
+ * network response arrived first.
+ */
+function sortFindingsStable(findings) {
+    findings.sort((a, b) => {
+        const [ap, al, ar] = findingSortKey(a);
+        const [bp, bl, br] = findingSortKey(b);
+        if (ap !== bp)
+            return ap < bp ? -1 : 1;
+        if (al !== bl)
+            return al - bl;
+        if (ar !== br)
+            return ar < br ? -1 : 1;
+        return 0;
+    });
+}
+async function safeReadJson(response) {
+    try {
+        return (await response.json());
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Build a structured ApiError carrying status, Retry-After, and the
+ * server's `error.details` blob (used by the validate→chunked fallback).
+ */
+function buildApiError(response, body) {
+    const errorObj = body && typeof body === 'object' && body['error'] && typeof body['error'] === 'object'
+        ? body['error']
+        : undefined;
+    const message = errorObj?.['message'] ||
+        `API request failed with status ${response.status}`;
+    const err = new Error(message);
+    err.status = response.status;
+    const retryAfterHeader = response.headers.get('retry-after');
+    if (retryAfterHeader) {
+        err.retryAfter = parseRetryAfterMs(retryAfterHeader) / 1000;
+    }
+    if (errorObj?.['details'] && typeof errorObj['details'] === 'object') {
+        err.details = errorObj['details'];
+    }
+    return err;
+}
+/**
+ * Unwrap the `{status, statusCode, data, error}` ApiResponse envelope. The
+ * inner `data` is what the caller actually wants; we keep the unwrap so
+ * the CLI doesn't need to know about the envelope shape. Falls through
+ * to the bare body for older deployments that don't wrap.
+ */
+async function unwrapEnvelope(response) {
+    const body = (await response.json());
+    if (body &&
+        typeof body === 'object' &&
+        'data' in body &&
+        'status' in body &&
+        body.status === 'success') {
+        return body.data;
+    }
+    return body;
+}
