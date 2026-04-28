@@ -3,48 +3,37 @@ export * from './api-client';
 export * from './formatters/table';
 export * from './formatters/prompt';
 export * from './formatters/sarif';
+interface ScanReturn {
+    scanId?: string;
+    passed: boolean;
+    exitCode: number;
+    findings: unknown[];
+    report: unknown;
+    summary: unknown;
+}
 /**
- * Scan a repository by collecting files and sending them to the API
+ * Scan a repository by collecting files and sending them to the API.
+ *
+ * Modes (selectable via `options.config`):
+ *   - default: synchronous validate; auto-falls-back to chunked sessions
+ *     if the server returns 413 with `suggestedEndpoint=/v1/compliance/scans`
+ *   - `mode: 'async'`: kicks off a 202 async-validate and polls until
+ *     terminal (returns same shape as default)
+ *   - `mode: 'chunked'`: explicit chunked-session flow regardless of size
  */
 export declare function scan(params: {
     repoPath: string;
     frameworks?: string[];
     options?: ScanOptions;
-}): Promise<{
-    passed: boolean;
-    exitCode: number;
-    findings: never[];
-    report: null;
-    summary?: undefined;
-} | {
-    passed: any;
-    exitCode: number;
-    findings: any;
-    report: any;
-    summary: any;
-}>;
+}): Promise<ScanReturn>;
 /**
- * Gate code strings directly without writing to disk
+ * Gate code strings directly without writing to disk (low-latency hook
+ * endpoint, used by coding-agent post-edit hooks).
  */
 export declare function gate(options: GateOptions): Promise<{
-    passed: any;
+    passed: boolean;
     exitCode: number;
-    findings: any;
-    prompt: any;
-    summary: any;
+    findings: unknown[];
+    prompt: string | undefined;
+    summary: unknown;
 }>;
-/**
- * Run local hook
- */
-export declare function runHook(params: {
-    frameworks?: string[];
-    filePath?: string;
-}): Promise<number>;
-/**
- * Run API hook
- */
-export declare function runHookApi(params: {
-    apiUrl?: string;
-    apiKey?: string;
-    frameworks?: string[];
-}): Promise<number>;
