@@ -288,9 +288,14 @@ class ComplianceApiClient:
         # REQUEST_TIMEOUT_S on its own). Belt-and-suspenders: also check
         # before sleeping so a scan that completes during the trailing
         # sleep window isn't reported as a timeout.
+        # Match the terminal-status set used by the short-circuit above
+        # — some endpoints/older API responses surface 'PASSED' rather
+        # than 'COMPLETED' for a successful scan. Treat all three as
+        # terminal so the loop doesn't spin out to the timeout while the
+        # scan is actually finished.
         while True:
             scan = self.get_scan(scan_id)
-            if scan.get("status") in ("COMPLETED", "FAILED"):
+            if scan.get("status") in ("COMPLETED", "FAILED", "PASSED"):
                 if "scanId" not in scan:
                     scan["scanId"] = scan_id
                 return scan
