@@ -227,16 +227,35 @@ class ComplianceApiClient:
         Caller polls ``get_scan(scanId)`` until status is COMPLETED or
         FAILED. Useful for CI runners that don't want to hold a connection
         for a 60 s scan.
+
+        On a 413 with ``details.suggestedEndpoint='/v1/compliance/scans'``,
+        transparently falls back to the chunked-session flow — same
+        contract as ``validate()``. ``validate_chunked()`` returns the
+        full final result rather than a kickoff envelope, so callers
+        that branch on ``status='IN_PROGRESS'`` should treat a chunked
+        return as a fully-completed scan.
         """
-        return self._request(
-            "POST",
-            "/v1/compliance/validate?async=true",
-            {
-                "files": files,
-                "frameworks": frameworks,
-                "options": self._build_options(options),
-            },
-        )
+        try:
+            return self._request(
+                "POST",
+                "/v1/compliance/validate?async=true",
+                {
+                    "files": files,
+                    "frameworks": frameworks,
+                    "options": self._build_options(options),
+                },
+            )
+        except ApiError as err:
+            if (
+                err.status_code == 413
+                and isinstance(err.body, dict)
+                and err.body.get("error", {})
+                .get("details", {})
+                .get("suggestedEndpoint")
+                == "/v1/compliance/scans"
+            ):
+                return self.validate_chunked(files, frameworks, options)
+            raise
 
     def get_scan(self, scan_id):
         """Fetch the current state of any scan (sync, async, chunked)."""
@@ -253,6 +272,13 @@ class ComplianceApiClient:
         """
         kickoff = self.validate_async(files, frameworks, options)
         scan_id = kickoff["scanId"]
+        # validate_async() may have transparently fallen back to the
+        # chunked-session flow on a 413 — in which case `kickoff` is
+        # already a fully-completed scan, not just a kickoff envelope.
+        # Short-circuit so we don't burn an extra get_scan() round-trip
+        # against a scan that's already terminal.
+        if kickoff.get("status") in ("COMPLETED", "FAILED", "PASSED"):
+            return kickoff
         deadline = time.monotonic() + ASYNC_POLL_TIMEOUT_S
 
         # Always poll at least once, and re-check the deadline AFTER the
