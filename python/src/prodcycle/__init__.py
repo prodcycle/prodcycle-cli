@@ -56,14 +56,41 @@ def scan(repo_path: str, frameworks: list[str] = None, options: dict = None) -> 
 
     passed = response.get('passed', False)
 
-    return {
+    # Pull `scannerError` through if the API set it. Without surfacing
+    # this, a CI report shows `passed: false, findings: []` and the
+    # caller can't distinguish "code is dirty" from "scanner is down."
+    # Mirrors the API's ScannerErrorInfo shape.
+    scanner_error = response.get('scannerError')
+
+    # Exit code semantics:
+    #   0 = passed (no actionable findings, no scanner error)
+    #   1 = findings present, code not clean
+    #   2 = scanner unavailable — could not certify either way; fail-closed
+    exit_code = 2 if scanner_error else (0 if passed else 1)
+
+    if scanner_error:
+        import sys
+        msg = scanner_error.get('message', 'unknown scanner error')
+        cls = scanner_error.get('errorClass')
+        code = scanner_error.get('errorCode')
+        suffix = ''
+        if cls:
+            suffix += f' (errorClass={cls})'
+        if code:
+            suffix += f' (errorCode={code})'
+        sys.stderr.write(f'⚠ Scanner error: {msg}{suffix}\n')
+
+    result = {
         'scanId': response.get('scanId'),
         'passed': passed,
-        'exitCode': 0 if passed else 1,
+        'exitCode': exit_code,
         'findings': response.get('findings', []),
         'report': response.get('report'),
-        'summary': response.get('summary', {})
+        'summary': response.get('summary', {}),
     }
+    if scanner_error:
+        result['scannerError'] = scanner_error
+    return result
 
 def gate(files: dict, frameworks: list[str] = None, severity_threshold: str = "medium", fail_on: list[str] = None, config: dict = None, api_url: str = None, api_key: str = None) -> dict:
     if frameworks is None:
@@ -88,11 +115,32 @@ def gate(files: dict, frameworks: list[str] = None, severity_threshold: str = "m
 
     passed = response.get('passed', False)
 
-    return {
+    # Same scannerError plumbing as scan() above. Coding-agent hooks
+    # especially need to distinguish "code is clean" from "scanner is
+    # down" — agents should NOT proceed on the latter.
+    scanner_error = response.get('scannerError')
+    exit_code = 2 if scanner_error else (0 if passed else 1)
+
+    if scanner_error:
+        import sys
+        msg = scanner_error.get('message', 'unknown scanner error')
+        cls = scanner_error.get('errorClass')
+        code = scanner_error.get('errorCode')
+        suffix = ''
+        if cls:
+            suffix += f' (errorClass={cls})'
+        if code:
+            suffix += f' (errorCode={code})'
+        sys.stderr.write(f'⚠ Scanner error: {msg}{suffix}\n')
+
+    result = {
         'passed': passed,
-        'exitCode': 0 if passed else 1,
+        'exitCode': exit_code,
         'findings': response.get('findings', []),
         'prompt': response.get('prompt', ''),
-        'summary': response.get('summary', {})
+        'summary': response.get('summary', {}),
     }
+    if scanner_error:
+        result['scannerError'] = scanner_error
+    return result
 
